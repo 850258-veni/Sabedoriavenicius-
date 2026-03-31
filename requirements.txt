@@ -1,8 +1,6 @@
 fastapi
 uvicorn
 asyncpg
-psycopg2-binary
-pandas
-streamlit
-fpdf
-
+httpx
+python-dotenv
+pydantic

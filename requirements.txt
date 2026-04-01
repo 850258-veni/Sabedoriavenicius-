@@ -5,3 +5,5 @@ httpx
 python-dotenv
 pydantic
 python-multipart
+uvicorn[standard]
+

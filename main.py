@@ -1,3 +1,4 @@
+import bcrypt # Adicione isto no topo de tudo
 import os, asyncio, csv, io
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, StreamingResponse

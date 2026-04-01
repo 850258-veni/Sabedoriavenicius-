@@ -1,10 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 asyncpg
 passlib[bcrypt]
-httpx
-python-dotenv
-pydantic
 python-multipart
-uvicorn[standard]
-
+python-dotenv

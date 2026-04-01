@@ -1,124 +1,193 @@
-import os, io, bcrypt, pandas as pd
-from datetime import datetime
-from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
+import os
+import pandas as pd
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from passlib.context import CryptContext
 import asyncpg
+from datetime import datetime
 
 app = FastAPI()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql://", 1) if os.getenv("DATABASE_URL") else None
+
+# Configuração da Base de Dados no Render
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 pool = None
 
 async def get_db():
     global pool
-    if pool is None: pool = await asyncpg.create_pool(DATABASE_URL)
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
-# --- DESIGN PREMIUM GRAPHITE & GOLD ---
+# --- 🛠️ AUTO-SETUP (MIGRATIONS) ---
+@app.on_event("startup")
+async def setup_db():
+    db = await get_db()
+    # 1. Tabela de Lojas
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS lojas (
+            id SERIAL PRIMARY KEY,
+            nome TEXT NOT NULL,
+            gmail_dono TEXT UNIQUE NOT NULL,
+            senha_hash TEXT NOT NULL,
+            chave_trabalhador TEXT UNIQUE NOT NULL,
+            pago BOOLEAN DEFAULT FALSE
+        );
+    """)
+    # 2. Tabela de Preços Padrão (Memória de Custo)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS precos_padrao (
+            id SERIAL PRIMARY KEY,
+            loja_id INT NOT NULL,
+            produto TEXT NOT NULL,
+            preco_custo FLOAT NOT NULL,
+            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(loja_id, LOWER(produto))
+        );
+    """)
+    # 3. Tabela de Vendas com Coluna de Custo
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS vendas_live (
+            id SERIAL PRIMARY KEY,
+            loja_id INT NOT NULL,
+            produto TEXT NOT NULL,
+            quantidade FLOAT NOT NULL,
+            preco FLOAT NOT NULL,
+            preco_custo FLOAT DEFAULT 0,
+            data_venda TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    print("✅ SISTEMA DE BASE DE DADOS SINCRONIZADO!")
+
+# --- CSS PREMIUM MOBILE-FIRST ---
 CSS = """
 <style>
-    :root { 
-        --bg: #121212; 
-        --card: #1e1e1e; 
-        --text: #e0e0e0; 
-        --primary: #ffb300; 
-        --accent: #333333;
-    }
-    body { 
-        font-family: 'Segoe UI', Roboto, sans-serif; 
-        background: var(--bg); 
-        color: var(--text); 
-        margin: 0; padding: 20px; 
-        display: flex; justify-content: center; 
-    }
-    .container { 
-        width: 100%; max-width: 450px; 
-        background: var(--card); 
-        padding: 40px; border-radius: 12px; 
-        border: 1px solid #2c2c2c;
-        box-shadow: 0 20px 40px rgba(0,0,0,0.5); 
-    }
-    h2 { color: var(--primary); text-transform: uppercase; letter-spacing: 2px; font-size: 1.5rem; text-align: center; }
-    input { 
-        width: 100%; padding: 14px; margin: 12px 0; 
-        border-radius: 4px; border: 1px solid #444; 
-        background: #252525; color: white; box-sizing: border-box; 
-    }
-    button { 
-        width: 100%; padding: 16px; border: none; border-radius: 4px; 
-        font-weight: bold; cursor: pointer; transition: 0.3s; 
-        text-transform: uppercase; letter-spacing: 1px;
-    }
-    .btn-reg { background: var(--primary); color: #000; }
-    .btn-adm { background: #e0e0e0; color: #000; }
-    button:hover { filter: brightness(1.2); transform: translateY(-2px); }
-    table { width: 100%; border-collapse: collapse; margin-top: 25px; }
-    th { border-bottom: 2px solid var(--primary); padding: 12px; text-align: left; color: var(--primary); font-size: 12px; }
-    td { padding: 12px; border-bottom: 1px solid #2c2c2c; font-size: 14px; }
-    .total-box { font-size: 40px; color: white; text-align: center; margin: 20px 0; font-weight: 200; }
+    :root { --bg: #0a0a0a; --card: #141414; --primary: #ffb300; --success: #10b981; --danger: #ef4444; }
+    body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: #fff; margin: 0; padding: 15px; }
+    .card { background: var(--card); padding: 20px; border-radius: 12px; border: 1px solid #222; margin-bottom: 15px; }
+    input, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #333; font-size: 16px; }
+    input { background: #1a1a1a; color: #fff; }
+    button { background: var(--primary); color: #000; font-weight: bold; cursor: pointer; border: none; }
+    .trend-up { border-left: 5px solid var(--success); }
+    .trend-down { border-left: 5px solid var(--danger); }
+    .trend-stable { border-left: 5px solid var(--primary); }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
+    th, td { text-align: left; padding: 10px; border-bottom: 1px solid #222; }
+    th { color: var(--primary); font-size: 11px; text-transform: uppercase; }
 </style>
 """
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    return f"{CSS}<div class='container'><h2>AutoReport</h2><p style='text-align:center; color:#888;'>Registo de Operações</p><form action='/registrar_venda' method='post'><input name='c' type='password' placeholder='CHAVE DO POSTO' required><input name='p' type='text' placeholder='NOME DO PRODUTO' required><input name='q' type='number' step='0.01' placeholder='QUANTIDADE' value='1'><input name='pr' type='number' step='0.01' placeholder='PREÇO UNITÁRIO (MT)' required><br><br><button type='submit' class='btn-reg'>EFETUAR REGISTO</button></form></div>"
-
-@app.post("/registrar_venda")
-async def registrar(c:str=Form(...), p:str=Form(...), q:float=Form(...), pr:float=Form(...)):
+# --- ROTA: FORMULÁRIO DE REGISTO INTELIGENTE ---
+@app.get("/registrar", response_class=HTMLResponse)
+async def pagina_registo(c: str, p: str = None):
     db = await get_db()
     loja = await db.fetchrow("SELECT id FROM lojas WHERE chave_trabalhador=$1", c.strip())
-    if not loja: return "❌ ERRO: CHAVE INVÁLIDA"
-    await db.execute("INSERT INTO vendas_live (loja_id, produto, quantidade, preco) VALUES ($1, $2, $3, $4)", loja['id'], p, q, pr)
-    return "✅ SUCESSO! <a href='/' style='color:var(--primary); text-decoration:none;'>[ VOLTAR ]</a>"
+    if not loja: return "❌ ACESSO NEGADO"
 
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_view():
-    return f"{CSS}<div class='container'><h2>ADMINISTRAÇÃO</h2><form action='/admin/dash' method='post'><input name='g' type='email' placeholder='GMAIL CORPORATIVO' required><input name='s' type='password' placeholder='SENHA DE ACESSO' required><br><br><button type='submit' class='btn-adm'>ACEDER AO PAINEL</button></form></div>"
+    custo_sugerido = 0.0
+    if p:
+        custo_sugerido = await db.fetchval(
+            "SELECT preco_custo FROM precos_padrao WHERE loja_id=$1 AND LOWER(produto)=LOWER($2)",
+            loja['id'], p.strip()
+        ) or 0.0
 
-@app.post("/admin/dash", response_class=HTMLResponse)
-async def dash(g:str=Form(...), s:str=Form(...)):
-    db = await get_db()
-    loja = await db.fetchrow("SELECT * FROM lojas WHERE LOWER(gmail_dono)=LOWER($1)", g.strip())
-    if not loja or not pwd_context.verify(s, loja['senha_hash']): return "❌ ACESSO NEGADO"
-    vendas = await db.fetch("SELECT data_venda, produto, quantidade, preco FROM vendas_live WHERE loja_id=$1 ORDER BY data_venda DESC", loja['id'])
-    
-    total = sum(v['quantidade'] * v['preco'] for v in vendas)
-    linhas = "".join([f"<tr><td>{v['data_venda'].strftime('%H:%M')}</td><td>{v['produto']}</td><td>{v['quantidade']*v['preco']:.2f} MT</td></tr>" for v in vendas])
-
-    return f"{CSS}<div class='container' style='max-width:800px;'><h2>{loja['nome']}</h2><div class='total-box'>{total:.2f} <span style='font-size:18px;'>MT</span></div><form action='/admin/export' method='post'><input type='hidden' name='id' value='{loja['id']}'><button type='submit' style='background:#333; color:white; border:1px solid #555;'>EXPORTAR RELATÓRIO PROFISSIONAL</button></form><table><thead><tr><th>HORA</th><th>ITEM</th><th>VALOR TOTAL</th></tr></thead><tbody>{linhas}</tbody></table></div>"
-
-@app.post("/admin/export")
-async def export(id:int=Form(...)):
-    db = await get_db()
-    vendas = await db.fetch("SELECT data_venda, produto, quantidade, preco FROM vendas_live WHERE loja_id=$1 ORDER BY data_venda DESC", id)
-    df = pd.DataFrame(vendas, columns=['data_venda', 'produto', 'quantidade', 'preco'])
-    df['Soma Total'] = df['quantidade'] * df['preco']
-    df['data_venda'] = df['data_venda'].dt.strftime('%d/%m/%Y %H:%M')
-    df.columns = ['Data e Hora', 'Produto', 'Qtd', 'Preço Unitário', 'Soma Total']
-    
-    output = io.BytesIO()
-    # Usando xlsxwriter para auto-ajustar as colunas (Adeus #####)
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Vendas')
-        worksheet = writer.sheets['Vendas']
-        for i, col in enumerate(df.columns):
-            column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
-            worksheet.set_column(i, i, column_len)
+    return f"""
+    <head><meta name="viewport" content="width=device-width, initial-scale=1">{CSS}</head>
+    <div class="card">
+        <h3>Registar Venda</h3>
+        <form action="/registrar_venda" method="post">
+            <input type="hidden" name="c" value="{c}">
+            <label>Produto:</label>
+            <input type="text" name="p" value="{p or ''}" placeholder="Nome do Produto" required 
+                   onblur="if(this.value) window.location.href='/registrar?c={c}&p='+this.value">
             
-    output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                             headers={"Content-Disposition": f"attachment; filename=AutoReport_Relatorio.xlsx"})
+            <label>Quantidade:</label>
+            <input type="number" name="q" value="1" step="0.01" required>
 
-@app.get("/setup_sistema", response_class=HTMLResponse)
-async def setup_v(): 
-    return f"{CSS}<div class='container'><h2>CONFIGURAÇÃO</h2><form action='/setup_sistema' method='post'><input name='mestre' placeholder='MASTER KEY' type='password'><input name='nome' placeholder='NOME DA LOJA'><input name='gmail' placeholder='GMAIL DONO'><input name='senha' placeholder='PASSWORD DONO' type='password'><input name='chave_t' placeholder='CHAVE DO TRABALHADOR'><br><br><button type='submit' class='btn-reg'>CRIAR UNIDADE</button></form></div>"
+            <label>Preço de Venda (Cada):</label>
+            <input type="number" name="pr" step="0.1" required>
 
-@app.post("/setup_sistema")
-async def setup_a(mestre:str=Form(...), nome:str=Form(...), gmail:str=Form(...), senha:str=Form(...), chave_t:str=Form(...)):
-    if mestre != "$Venicius2005$": return "NEGADO"
+            <label style="color: var(--primary);">Custo Unitário (Auto):</label>
+            <input type="number" name="pc" value="{custo_sugerido}" step="0.1" required>
+
+            <button type="submit">CONFIRMAR VENDA</button>
+        </form>
+    </div>
+    """
+
+# --- ROTA: PROCESSAR VENDA E MEMORIZAR CUSTO ---
+@app.post("/registrar_venda")
+async def registrar_venda(c:str=Form(...), p:str=Form(...), q:float=Form(...), pr:float=Form(...), pc:float=Form(...)):
     db = await get_db()
-    await db.execute("CREATE TABLE IF NOT EXISTS lojas (id SERIAL PRIMARY KEY, nome TEXT, gmail_dono TEXT UNIQUE, senha_hash TEXT, chave_trabalhador TEXT UNIQUE)")
-    await db.execute("CREATE TABLE IF NOT EXISTS vendas_live (id SERIAL PRIMARY KEY, loja_id INTEGER REFERENCES lojas(id), produto TEXT, quantidade FLOAT, preco FLOAT, data_venda TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-    await db.execute("INSERT INTO lojas (nome, gmail_dono, senha_hash, chave_trabalhador) VALUES ($1, $2, $3, $4)", nome, gmail.lower().strip(), pwd_context.hash(senha), chave_t.strip())
-    return "✅ UNIDADE CRIADA!"
+    loja = await db.fetchrow("SELECT id FROM lojas WHERE chave_trabalhador=$1", c.strip())
+    if not loja: return "❌ ERRO"
+
+    # 1. Salva a venda
+    await db.execute(
+        "INSERT INTO vendas_live (loja_id, produto, quantidade, preco, preco_custo) VALUES ($1, $2, $3, $4, $5)",
+        loja['id'], p, q, pr, pc
+    )
+    # 2. Atualiza memória de custo
+    await db.execute("""
+        INSERT INTO precos_padrao (loja_id, produto, preco_custo) VALUES ($1, $2, $3)
+        ON CONFLICT (loja_id, LOWER(produto)) DO UPDATE SET preco_custo = EXCLUDED.preco_custo
+    """, loja['id'], p, pc)
+    
+    return RedirectResponse(url=f"/registrar?c={c}", status_code=303)
+
+# --- ROTA: DASHBOARD DE LUCRO E TENDÊNCIA ---
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(c:str):
+    db = await get_db()
+    loja = await db.fetchrow("SELECT id, nome FROM lojas WHERE chave_trabalhador=$1", c.strip())
+    if not loja: return "❌ ACESSO NEGADO"
+
+    rows = await db.fetch("SELECT produto, quantidade, preco, preco_custo, data_venda FROM vendas_live WHERE loja_id=$1", loja['id'])
+    if not rows: return f"{CSS}<div class='card'>Nenhuma venda registada.</div>"
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    df['lucro'] = (df['preco'] - df['preco_custo']) * df['quantidade']
+    df['data'] = pd.to_datetime(df['data_venda']).dt.date
+
+    # Tendência
+    lucro_diario = df.groupby('data')['lucro'].sum().sort_index().reset_index()
+    estilo_trend, msg_trend, alerta = "trend-stable", "📊 TENDÊNCIA: Estável", "Dados em análise."
+    
+    if len(lucro_diario) > 1:
+        hoje = lucro_diario.iloc[-1]['lucro']
+        media = lucro_diario['lucro'].tail(4).iloc[:-1].mean()
+        var = ((hoje - media)/media*100) if media != 0 else 0
+        if var > 5: estilo_trend, msg_trend, alerta = "trend-up", "📈 LUCRO A SUBIR", "Excelente performance!"
+        elif var < -5: estilo_trend, msg_trend, alerta = "trend-down", "📉 LUCRO EM QUEDA", "Atenção aos custos e margens!"
+
+    # Resumo
+    resumo = df.groupby('produto').agg({'quantidade':'sum', 'lucro':'sum'}).reset_index()
+    top_p = resumo.loc[resumo['lucro'].idxmax()]
+
+    html_tabela = "".join([f"<tr><td>{r['produto']}</td><td>{r['quantidade']:.0f}</td><td style='color:var(--success)'>{r['lucro']:.2f}</td></tr>" for _, r in resumo.iterrows()])
+
+    return f"""
+    <head><meta name="viewport" content="width=device-width, initial-scale=1">{CSS}</head>
+    <div class="card {estilo_trend}">
+        <div style="font-size:12px; font-weight:bold; color:#aaa;">{msg_trend}</div>
+        <h2 style="margin:5px 0;">{loja['nome']}</h2>
+        <p style="font-size:13px; color:#888;">{alerta}</p>
+    </div>
+    
+    <div class="card">
+        <span style="font-size:11px; color:var(--primary);">PRODUTO ESTRELA</span><br>
+        <b style="font-size:20px;">{top_p['produto']}</b><br>
+        <span style="color:var(--success);">+{top_p['lucro']:.2f} MT Lucro Líquido</span>
+    </div>
+
+    <div class="card">
+        <h3>Performance de Itens</h3>
+        <table>
+            <thead><tr><th>ITEM</th><th>QTD</th><th>LUCRO (MT)</th></tr></thead>
+            <tbody>{html_tabela}</tbody>
+        </table>
+    </div>
+    """

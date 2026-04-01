@@ -22,10 +22,11 @@ async def get_db():
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
-# --- 🛠️ AUTO-SETUP (MIGRATIONS) ---
+# --- 🛠️ AUTO-SETUP (SINTAXE CORRIGIDA PARA RENDER) ---
 @app.on_event("startup")
 async def setup_db():
     db = await get_db()
+    
     # 1. Tabela de Lojas
     await db.execute("""
         CREATE TABLE IF NOT EXISTS lojas (
@@ -35,9 +36,10 @@ async def setup_db():
             senha_hash TEXT NOT NULL,
             chave_trabalhador TEXT UNIQUE NOT NULL,
             pago BOOLEAN DEFAULT FALSE
-        );
+        )
     """)
-    # 2. Tabela de Preços Padrão (Memória de Custo)
+    
+    # 2. Tabela de Preços Padrão (Sintaxe Simplificada)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS precos_padrao (
             id SERIAL PRIMARY KEY,
@@ -45,10 +47,11 @@ async def setup_db():
             produto TEXT NOT NULL,
             preco_custo FLOAT NOT NULL,
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(loja_id, LOWER(produto))
-        );
+            UNIQUE(loja_id, produto)
+        )
     """)
-    # 3. Tabela de Vendas com Coluna de Custo
+    
+    # 3. Tabela de Vendas
     await db.execute("""
         CREATE TABLE IF NOT EXISTS vendas_live (
             id SERIAL PRIMARY KEY,
@@ -58,9 +61,9 @@ async def setup_db():
             preco FLOAT NOT NULL,
             preco_custo FLOAT DEFAULT 0,
             data_venda TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+        )
     """)
-    print("✅ SISTEMA DE BASE DE DADOS SINCRONIZADO!")
+    print("✅ BANCO DE DADOS SINCRONIZADO!")
 
 # --- CSS PREMIUM MOBILE-FIRST ---
 CSS = """
@@ -90,7 +93,7 @@ async def pagina_registo(c: str, p: str = None):
     custo_sugerido = 0.0
     if p:
         custo_sugerido = await db.fetchval(
-            "SELECT preco_custo FROM precos_padrao WHERE loja_id=$1 AND LOWER(produto)=LOWER($2)",
+            "SELECT preco_custo FROM precos_padrao WHERE loja_id=$1 AND produto=$2",
             loja['id'], p.strip()
         ) or 0.0
 
@@ -133,7 +136,7 @@ async def registrar_venda(c:str=Form(...), p:str=Form(...), q:float=Form(...), p
     # 2. Atualiza memória de custo
     await db.execute("""
         INSERT INTO precos_padrao (loja_id, produto, preco_custo) VALUES ($1, $2, $3)
-        ON CONFLICT (loja_id, LOWER(produto)) DO UPDATE SET preco_custo = EXCLUDED.preco_custo
+        ON CONFLICT (loja_id, produto) DO UPDATE SET preco_custo = EXCLUDED.preco_custo
     """, loja['id'], p, pc)
     
     return RedirectResponse(url=f"/registrar?c={c}", status_code=303)
@@ -191,3 +194,4 @@ async def dashboard(c:str):
         </table>
     </div>
     """
+ 

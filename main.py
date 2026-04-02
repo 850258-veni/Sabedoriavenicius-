@@ -10,7 +10,7 @@ import uvicorn
 app = FastAPI()
 
 # --- CONFIGURAÇÃO E CONEXÃO ---
-ADMIN_PASS = "SABEDORIA2026" # Senha Mestra do Sistema
+ADMIN_PASS = "SABEDORIA2026" 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -22,7 +22,7 @@ async def get_db():
         pool = await asyncpg.create_pool(DATABASE_URL)
     return pool
 
-# --- 🔐 SEGURANÇA: PBKDF2 + SALT (Nível Bancário) ---
+# --- 🔐 SEGURANÇA: PBKDF2 + SALT ---
 def gerar_hash_seguro(pin: str):
     salt = os.urandom(16)
     key = hashlib.pbkdf2_hmac('sha256', pin.encode(), salt, 100000)
@@ -38,11 +38,10 @@ def verificar_pin_seguro(pin_digitado: str, hash_armazenado: str):
     except Exception:
         return False
 
-# --- 🛠️ SETUP: ESTRUTURA DE DADOS ROBUSTA ---
+# --- 🛠️ SETUP: ESTRUTURA ---
 @app.on_event("startup")
 async def setup_db():
     db = await get_db()
-    # Lojas
     await db.execute("""
         CREATE TABLE IF NOT EXISTS lojas (
             id SERIAL PRIMARY KEY, 
@@ -51,7 +50,6 @@ async def setup_db():
             pago BOOLEAN DEFAULT FALSE
         )
     """)
-    # Usuários com PIN Seguro
     await db.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id SERIAL PRIMARY KEY,
@@ -63,7 +61,6 @@ async def setup_db():
             UNIQUE(loja_id, nome)
         )
     """)
-    # Stock e Preços (Sem redundância)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS stock (
             id SERIAL PRIMARY KEY,
@@ -74,7 +71,6 @@ async def setup_db():
             UNIQUE(loja_id, produto)
         )
     """)
-    # Vendas (Assinadas por Usuário)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS vendas_live (
             id SERIAL PRIMARY KEY, 
@@ -87,9 +83,8 @@ async def setup_db():
             data_venda TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    print("🚀 SISTEMA INVIOLÁVEL ONLINE")
+    print("✅ SISTEMA CORRIGIDO E ONLINE!")
 
-# --- UI: CSS MINIMALISTA PARA MOBILE ---
 CSS = """<style>:root { --bg: #0a0a0a; --card: #141414; --primary: #ffb300; --success: #10b981; --danger: #ef4444; }
 body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: #fff; padding: 15px; margin: 0; }
 .card { background: var(--card); padding: 20px; border-radius: 15px; border: 1px solid #222; margin-bottom: 15px; max-width: 450px; margin: auto; }
@@ -100,8 +95,6 @@ button { background: var(--primary); font-weight: bold; border: none; cursor: po
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 td { padding: 12px 8px; border-bottom: 1px solid #222; }
 </style>"""
-
-# --- ROTAS PRINCIPAIS ---
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -142,7 +135,6 @@ async def processar_venda(c:str=Form(...), u:str=Form(...), pin:str=Form(...), p
     l = await db.fetchrow("SELECT id FROM lojas WHERE chave_trabalhador = $1", c.strip())
     if not l: return "❌ LOJA INVÁLIDA"
 
-    # Autenticação
     user = await db.fetchrow("SELECT * FROM usuarios WHERE loja_id = $1 AND nome = $2", l['id'], u.strip())
     if not user or user['bloqueado']: return "❌ USUÁRIO BLOQUEADO OU INEXISTENTE"
     if not verificar_pin_seguro(pin, user['pin_hash']):
@@ -150,7 +142,6 @@ async def processar_venda(c:str=Form(...), u:str=Form(...), pin:str=Form(...), p
         if user['tentativas'] + 1 >= 3: await db.execute("UPDATE usuarios SET bloqueado = TRUE WHERE id = $1", user['id'])
         return "❌ PIN INCORRETO"
     
-    # Transação Atómica: Stock + Venda
     item = await db.fetchrow("SELECT quantidade, preco_custo FROM stock WHERE loja_id=$1 AND produto=$2", l['id'], p)
     if not item or item['quantidade'] <= 0: return "❌ SEM STOCK"
 
@@ -182,21 +173,25 @@ async def dashboard(c: str, d: str = None):
     <form method='get' style='margin-top:10px;'><input type='hidden' name='c' value='{c}'><input type='date' name='d' value='{data_alvo}' onchange='this.form.submit()'></form>
     </div>"""
 
-# --- ADMIN: GESTÃO DE ACESSOS E REPOSIÇÃO ---
-
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(senha: str = ""):
-    if senha != ADMIN_PASS: return f"{CSS}<div class='card'><form><input name='senha' type='password' placeholder='Senha Mestra'><button>ENTRAR</button></form></div>"
+    if senha != ADMIN_PASS: 
+        return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
+        <div class='card'><form><input name='senha' type='password' placeholder='Senha Mestra'><button>ENTRAR</button></form></div>"""
+    
     db = await get_db()
     lojas = await db.fetch("SELECT id, nome FROM lojas")
-    return f"{CSS}<div class='card'><h3>Criar Usuário</h3>
+    lojas_html = "".join([f"<option value='{l['id']}'>{l['nome']}</option>" for l in lojas])
+
+    return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
+    <div class='card'><h3>Criar Usuário</h3>
     <form action='/add_user' method='post'><input type='hidden' name='s' value='{senha}'>
-    <select name='l_id'>{"".join([f"<option value='{l['id']}'>{l['nome']}</option>" for l in lojas])}</select>
+    <select name='l_id'>{lojas_html}</select>
     <input name='n' placeholder='Nome'> <input name='p' placeholder='PIN'> <button>CRIAR</button></form></div>
     <div class='card'><h3>Reposição de Stock</h3>
     <form action='/repor' method='post'><input type='hidden' name='s' value='{senha}'>
-    <select name='l_id'>{"".join([f"<option value='{l['id']}'>{l['nome']}</option>" for l in lojas])}</select>
-    <input name='p' placeholder='Produto'> <input type='number' name='q' placeholder='Qtd'> <input type='number' name='pc' step='0.1' placeholder='Custo Unitário'> <button>REPOR</button></form></div>"
+    <select name='l_id'>{lojas_html}</select>
+    <input name='p' placeholder='Produto'> <input type='number' name='q' placeholder='Qtd'> <input type='number' name='pc' step='0.1' placeholder='Custo Unitário'> <button>REPOR</button></form></div>"""
 
 @app.post("/add_user")
 async def add_user(s:str=Form(...), l_id:int=Form(...), n:str=Form(...), p:str=Form(...)):
@@ -214,4 +209,3 @@ async def repor_stock(s:str=Form(...), l_id:int=Form(...), p:str=Form(...), q:fl
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
- 

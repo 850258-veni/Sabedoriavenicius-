@@ -1,6 +1,7 @@
 import os
 import hashlib
 import binascii
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -9,20 +10,26 @@ import uvicorn
 
 app = FastAPI()
 
-# --- CONFIGURAÇÃO E CONEXÃO ---
+# --- CONFIGURAÇÃO ---
 ADMIN_PASS = "SABEDORIA2026" 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 pool = None
+
 async def get_db():
     global pool
     if pool is None:
-        pool = await asyncpg.create_pool(DATABASE_URL)
+        try:
+            # Adicionado timeout de 10s para não travar o Render
+            pool = await asyncio.wait_for(asyncpg.create_pool(DATABASE_URL), timeout=10.0)
+        except Exception as e:
+            print(f"❌ ERRO CRÍTICO NA DB: {e}")
+            return None
     return pool
 
-# --- 🔐 SEGURANÇA: PBKDF2 + SALT ---
+# --- 🔐 SEGURANÇA ---
 def gerar_hash_seguro(pin: str):
     salt = os.urandom(16)
     key = hashlib.pbkdf2_hmac('sha256', pin.encode(), salt, 100000)
@@ -35,51 +42,23 @@ def verificar_pin_seguro(pin_digitado: str, hash_armazenado: str):
         key_original = binascii.unhexlify(key_hex)
         nova_key = hashlib.pbkdf2_hmac('sha256', pin_digitado.encode(), salt, 100000)
         return nova_key == key_original
-    except Exception:
-        return False
+    except: return False
 
-# --- 🛠️ SETUP: ESTRUTURA DE DADOS ---
+# --- 🛠️ SETUP ---
 @app.on_event("startup")
 async def setup_db():
     db = await get_db()
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS lojas (
-            id SERIAL PRIMARY KEY, 
-            nome TEXT, 
-            chave_trabalhador TEXT UNIQUE, 
-            pago BOOLEAN DEFAULT TRUE
-        );
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id SERIAL PRIMARY KEY,
-            loja_id INT REFERENCES lojas(id),
-            nome TEXT,
-            pin_hash TEXT,
-            tentativas INT DEFAULT 0,
-            bloqueado BOOLEAN DEFAULT FALSE,
-            UNIQUE(loja_id, nome)
-        );
-        CREATE TABLE IF NOT EXISTS stock (
-            id SERIAL PRIMARY KEY,
-            loja_id INT REFERENCES lojas(id),
-            produto TEXT,
-            quantidade FLOAT DEFAULT 0,
-            preco_custo FLOAT DEFAULT 0,
-            UNIQUE(loja_id, produto)
-        );
-        CREATE TABLE IF NOT EXISTS vendas_live (
-            id SERIAL PRIMARY KEY, 
-            loja_id INT REFERENCES lojas(id), 
-            usuario_id INT REFERENCES usuarios(id), 
-            produto TEXT, 
-            quantidade FLOAT, 
-            preco FLOAT, 
-            preco_custo FLOAT, 
-            data_venda TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    print("🚀 SISTEMA SABEDORIA ONLINE EM TETE")
+    if db:
+        async with db.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS lojas (id SERIAL PRIMARY KEY, nome TEXT, chave_trabalhador TEXT UNIQUE, pago BOOLEAN DEFAULT TRUE);
+                CREATE TABLE IF NOT EXISTS usuarios (id SERIAL PRIMARY KEY, loja_id INT REFERENCES lojas(id), nome TEXT, pin_hash TEXT, tentativas INT DEFAULT 0, bloqueado BOOLEAN DEFAULT FALSE, UNIQUE(loja_id, nome));
+                CREATE TABLE IF NOT EXISTS stock (id SERIAL PRIMARY KEY, loja_id INT REFERENCES lojas(id), produto TEXT, quantidade FLOAT DEFAULT 0, preco_custo FLOAT DEFAULT 0, UNIQUE(loja_id, produto));
+                CREATE TABLE IF NOT EXISTS vendas_live (id SERIAL PRIMARY KEY, loja_id INT REFERENCES lojas(id), usuario_id INT REFERENCES usuarios(id), produto TEXT, quantidade FLOAT, preco FLOAT, preco_custo FLOAT, data_venda TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+            """)
+            print("✅ TABELAS VERIFICADAS")
 
-# --- UI: CSS ---
+# --- UI CSS ---
 CSS = """<style>:root { --bg: #0a0a0a; --card: #141414; --primary: #ffb300; --success: #10b981; --danger: #ef4444; }
 body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: #fff; padding: 15px; margin: 0; }
 .card { background: var(--card); padding: 20px; border-radius: 15px; border: 1px solid #222; margin-bottom: 15px; max-width: 450px; margin: auto; }
@@ -91,8 +70,7 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top:10px
 td, th { padding: 12px 8px; border-bottom: 1px solid #222; text-align: left; }
 </style>"""
 
-# --- ROTAS DE VENDAS ---
-
+# --- ROTAS ---
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
@@ -109,78 +87,46 @@ async def home():
 @app.get("/registrar", response_class=HTMLResponse)
 async def pagina_registo(c: str):
     db = await get_db()
+    if not db: return "❌ ERRO DE LIGAÇÃO À BASE DE DADOS"
     l = await db.fetchrow("SELECT id, nome, pago FROM lojas WHERE chave_trabalhador = $1", c.strip())
     if not l: return "❌ LOJA NÃO ENCONTRADA"
-    if not l['pago']: return "❌ ACESSO BLOQUEADO: CONTACTE O ADMINISTRADOR"
-    
+    if not l['pago']: return "❌ ACESSO BLOQUEADO"
     produtos = await db.fetch("SELECT produto, quantidade FROM stock WHERE loja_id = $1 AND quantidade > 0", l['id'])
     opts = "".join([f"<option value='{p['produto']}'>{p['produto']} ({p['quantidade']})</option>" for p in produtos])
-
     return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
     <div class='card'><h3>{l['nome']}</h3>
-    <form action='/vender' method='post'>
-        <input type='hidden' name='c' value='{c}'>
-        <input name='u' placeholder='Seu Nome' required>
-        <input name='pin' type='password' placeholder='PIN' required maxlength='4'>
-        <select name='p' required><option value=''>Escolher Produto...</option>{opts}</select>
-        <input type='number' name='pr' step='0.1' placeholder='Preço de Venda' required>
-        <button type='submit'>REGISTAR VENDA</button>
-    </form></div>"""
+    <form action='/vender' method='post'><input type='hidden' name='c' value='{c}'><input name='u' placeholder='Seu Nome' required><input name='pin' type='password' placeholder='PIN' required maxlength='4'><select name='p' required><option value=''>Produto...</option>{opts}</select><input type='number' name='pr' step='0.1' placeholder='Preço' required><button type='submit'>VENDER</button></form></div>"""
 
 @app.post("/vender")
 async def processar_venda(c:str=Form(...), u:str=Form(...), pin:str=Form(...), p:str=Form(...), pr:float=Form(...)):
     db = await get_db()
     l = await db.fetchrow("SELECT id, pago FROM lojas WHERE chave_trabalhador = $1", c.strip())
-    if not l or not l['pago']: return "❌ BLOQUEADO"
-
     user = await db.fetchrow("SELECT * FROM usuarios WHERE loja_id = $1 AND nome = $2", l['id'], u.strip())
-    if not user or user['bloqueado'] or not verificar_pin_seguro(pin, user['pin_hash']): return "❌ PIN OU USUÁRIO INVÁLIDO"
-    
+    if not user or not verificar_pin_seguro(pin, user['pin_hash']): return "❌ INVÁLIDO"
     item = await db.fetchrow("SELECT quantidade, preco_custo FROM stock WHERE loja_id=$1 AND produto=$2", l['id'], p)
-    if not item or item['quantidade'] <= 0: return "❌ SEM STOCK"
-
     async with db.transaction():
         await db.execute("UPDATE stock SET quantidade = quantidade - 1 WHERE loja_id=$1 AND produto=$2", l['id'], p)
-        await db.execute("INSERT INTO vendas_live (loja_id, usuario_id, produto, quantidade, preco, preco_custo) VALUES ($1, $2, $3, 1, $4, $5)", 
-                         l['id'], user['id'], p, pr, item['preco_custo'])
+        await db.execute("INSERT INTO vendas_live (loja_id, usuario_id, produto, quantidade, preco, preco_custo) VALUES ($1, $2, $3, 1, $4, $5)", l['id'], user['id'], p, pr, item['preco_custo'])
     return RedirectResponse(f"/registrar?c={c}", status_code=303)
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(c: str, d: str = None):
     db = await get_db()
     l = await db.fetchrow("SELECT id, nome, pago FROM lojas WHERE chave_trabalhador = $1", c.strip())
-    if not l or not l['pago']: return "❌ BLOQUEADO"
-    
     data_alvo = d if d else datetime.now().strftime('%Y-%m-%d')
-    vendas = await db.fetch("""
-        SELECT u.nome as func, v.produto, (v.preco - v.preco_custo) as lucro 
-        FROM vendas_live v JOIN usuarios u ON v.usuario_id = u.id 
-        WHERE v.loja_id = $1 AND DATE(v.data_venda AT TIME ZONE 'UTC' AT TIME ZONE '+02') = $2
-    """, l['id'], data_alvo)
-    
+    vendas = await db.fetch("SELECT u.nome as func, v.produto, (v.preco - v.preco_custo) as lucro FROM vendas_live v JOIN usuarios u ON v.usuario_id = u.id WHERE v.loja_id = $1 AND DATE(v.data_venda AT TIME ZONE 'UTC' AT TIME ZONE '+02') = $2", l['id'], data_alvo)
     lucro_total = sum([v['lucro'] for v in vendas])
-    return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
-    <div class='card'><span class='mini-text'>Lucro Real {data_alvo}</span><br><span class='val'>{lucro_total:.2f} MT</span></div>
-    <div class='card'><table><tr><th>Func</th><th>Item</th><th>Lucro</th></tr>
-    {"".join([f"<tr><td>{v['func']}</td><td>{v['produto']}</td><td>{v['lucro']:.2f}</td></tr>" for v in vendas]) or "<tr><td colspan='3'>Sem vendas.</td></tr>"}
-    </table><form method='get' style='margin-top:10px;'><input type='hidden' name='c' value='{c}'><input type='date' name='d' value='{data_alvo}' onchange='this.form.submit()'></form>
-    </div>"""
-
-# --- PAINEL DE GESTÃO DA LOJA (ESTOQUE / USERS) ---
+    return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head><div class='card'><span>Lucro {data_alvo}</span><br><span class='val'>{lucro_total:.2f} MT</span></div><div class='card'><table>{"".join([f"<tr><td>{v['func']}</td><td>{v['produto']}</td><td>{v['lucro']:.2f}</td></tr>" for v in vendas])}</table></div>"""
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(senha: str = ""):
-    if senha != ADMIN_PASS: return f"{CSS}<div class='card'><form><input name='senha' type='password' placeholder='Senha Mestra'><button>ENTRAR</button></form></div>"
+    if senha != ADMIN_PASS: return f"{CSS}<div class='card'><form><input name='senha' type='password'><button>ENTRAR</button></form></div>"
     db = await get_db()
     lojas = await db.fetch("SELECT id, nome FROM lojas WHERE pago = TRUE")
     opts = "".join([f"<option value='{l['id']}'>{l['nome']}</option>" for l in lojas])
     return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
-    <div class='card'><h3>Criar Usuário</h3>
-    <form action='/add_user' method='post'><input type='hidden' name='s' value='{senha}'>
-    <select name='l_id'>{opts}</select><input name='n' placeholder='Nome'><input name='p' placeholder='PIN 4 Digitos'><button>CRIAR</button></form></div>
-    <div class='card'><h3>Reposição Stock</h3>
-    <form action='/repor' method='post'><input type='hidden' name='s' value='{senha}'>
-    <select name='l_id'>{opts}</select><input name='p' placeholder='Produto' style='text-transform:uppercase;'><input type='number' name='q' placeholder='Qtd'><input type='number' name='pc' step='0.1' placeholder='Custo Unitário'><button>REPOR</button></form></div>"""
+    <div class='card'><h3>Usuário</h3><form action='/add_user' method='post'><input type='hidden' name='s' value='{senha}'><select name='l_id'>{opts}</select><input name='n' placeholder='Nome'><input name='p' placeholder='PIN'><button>CRIAR</button></form></div>
+    <div class='card'><h3>Stock</h3><form action='/repor' method='post'><input type='hidden' name='s' value='{senha}'><select name='l_id'>{opts}</select><input name='p' placeholder='Produto'><input type='number' name='q' placeholder='Qtd'><input type='number' name='pc' step='0.1' placeholder='Custo'><button>REPOR</button></form></div>"""
 
 @app.post("/add_user")
 async def add_user(s:str=Form(...), l_id:int=Form(...), n:str=Form(...), p:str=Form(...)):
@@ -192,17 +138,13 @@ async def repor_stock(s:str=Form(...), l_id:int=Form(...), p:str=Form(...), q:fl
     if s == ADMIN_PASS: await (await get_db()).execute("INSERT INTO stock (loja_id, produto, quantidade, preco_custo) VALUES ($1, $2, $3, $4) ON CONFLICT (loja_id, produto) DO UPDATE SET quantidade = stock.quantidade + EXCLUDED.quantidade, preco_custo = EXCLUDED.preco_custo", l_id, p.upper().strip(), q, pc)
     return RedirectResponse(f"/admin?senha={s}", status_code=303)
 
-# --- 👑 PAINEL SUPER ADMIN (CONTROLO DE VENICIUS) ---
-
 @app.get("/super_admin", response_class=HTMLResponse)
 async def super_admin(senha: str = ""):
-    if senha != ADMIN_PASS: return f"{CSS}<div class='card'><form><input name='senha' type='password' placeholder='Acesso Mestre'><button>ENTRAR</button></form></div>"
+    if senha != ADMIN_PASS: return f"{CSS}<div class='card'><form><input name='senha' type='password'><button>ENTRAR</button></form></div>"
     db = await get_db()
     lojas = await db.fetch("SELECT * FROM lojas ORDER BY id DESC")
-    rows = "".join([f"<tr><td>{l['nome']}</td><td>{l['chave_trabalhador']}</td><td>{'✅' if l['pago'] else '❌'}</td><td><form action='/toggle' method='post'><input type='hidden' name='s' value='{senha}'><input type='hidden' name='id' value='{l['id']}'><button style='background:{'var(--danger)' if l['pago'] else 'var(--success)'}; font-size:10px; color:#fff;'>{('BLOQUEAR' if l['pago'] else 'ATIVAR')}</button></form></td></tr>" for l in lojas])
-    return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head>
-    <div class='card'><h3>🚀 Nova Loja</h3><form action='/nova_loja' method='post'><input type='hidden' name='s' value='{senha}'><input name='n' placeholder='Nome da Loja'><input name='c' placeholder='Chave (Ex: TETE01)'><button>ATIVAR LOJA</button></form></div>
-    <div class='card'><table><tr><th>Loja</th><th>Chave</th><th>Status</th><th>Ação</th></tr>{rows}</table></div>"""
+    rows = "".join([f"<tr><td>{l['nome']}</td><td>{l['chave_trabalhador']}</td><td><form action='/toggle' method='post'><input type='hidden' name='s' value='{senha}'><input type='hidden' name='id' value='{l['id']}'><button style='background:{'var(--danger)' if l['pago'] else 'var(--success)'}; color:#fff;'>{('BLOQUEAR' if l['pago'] else 'ATIVAR')}</button></form></td></tr>" for l in lojas])
+    return f"""<head><meta name='viewport' content='width=device-width, initial-scale=1'>{CSS}</head><div class='card'><h3>🚀 Nova Loja</h3><form action='/nova_loja' method='post'><input type='hidden' name='s' value='{senha}'><input name='n' placeholder='Nome'><input name='c' placeholder='Chave'><button>ATIVAR</button></form></div><div class='card'><table>{rows}</table></div>"""
 
 @app.post("/nova_loja")
 async def nova_loja(s:str=Form(...), n:str=Form(...), c:str=Form(...)):
@@ -216,4 +158,3 @@ async def toggle_loja(s:str=Form(...), id:int=Form(...)):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
- 

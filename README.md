@@ -1,24 +1,111 @@
 # AutoReport Business
 
-An internal reporting automation system designed to replace manual spreadsheet consolidation workflows for operations and growth teams.
-
-[📺 Watch 30s Demo](LINK_DO_TEU_VIDEO_AQUI) • [📊 Launch Live Tool](LINK_DO_TEU_RENDER_AQUI)
+> **Real-time sales reporting automation for operations teams — from raw database to interactive dashboard in under 30 seconds.**
 
 ---
 
-## 💼 The Business Problem
+## The Business Problem
 
-Small operations teams frequently waste between 4 to 8 hours every week manually exporting, sanitizing, and consolidating operational data across fragmented channels (CSV exports, database queries, and internal APIs) just to deliver routine stakeholder reports. This manual overhead creates operational drag, high error rates, and delayed decision-making.
+Operations teams waste **4 to 8 hours every week** manually exporting, filtering, and consolidating sales data across spreadsheets just to deliver routine reports to stakeholders.
 
-**AutoReport Business** automates this entire pipeline. It ingests raw operational data, executes automated data cleaning, and serves an interactive visual dashboard in a single pipeline—**reducing weekly reporting time from hours to under 30 seconds.**
+**AutoReport Business eliminates this entirely.**
 
-## 📊 Performance & Impact (Production Benchmarks)
+It connects directly to a live PostgreSQL database, processes sales records in real time, and serves an interactive visual dashboard — replacing multi-step Excel workflows with a single, automated pipeline.
 
-* **Zero Manual Formatting:** Replaces multi-step Excel VLOOKUP/Pivot workflows with a single execution pipeline.
-* **High-Throughput Ingestion:** Processes and sanitizes thousands of operational data rows in seconds.
-* **Operational Efficiency:** Eliminates human error in missing values and data type mismatches before visualization.
+---
 
-## 🛠️ System Architecture & Data Flow
+## Live Demo
 
-The system is engineered for lightweight, low-maintenance deployment, ensuring operational data is processed securely and efficiently.
+> Local demo available on request. Screenshots below show the system running against a live Supabase PostgreSQL instance.
 
+---
+
+## Key Features
+
+| Feature | Description |
+|---|---|
+| Real-Time KPIs | Live total revenue and item count metrics updated on every load |
+| Sales Flow Chart | Time-series line chart of daily revenue built from live transaction data |
+| Multi-Tenant Auth | API key authentication isolates each company's data at query level |
+| PDF Report Export | One-click generation and download of a formatted sales report |
+| Secure DB Connection | Environment-variable credential injection — zero hardcoded secrets |
+
+---
+
+## System Architecture
+
+```
+User (API Key)
+      │
+      ▼
+Streamlit Frontend (app.py)
+      │
+      ▼
+psycopg2 → PostgreSQL (Supabase)
+      │
+      ▼
+Pandas DataFrame Processing
+      │
+      ├── KPI Metrics (st.metric)
+      ├── Time-Series Chart (st.line_chart)
+      ├── Interactive Table (st.dataframe)
+      └── PDF Export (fpdf → st.download_button)
+```
+
+---
+
+## Performance & Impact
+
+- **Reporting time reduced from 4 hours to under 30 seconds**
+- Processes hundreds of sales records per query with zero manual formatting
+- Eliminates human error in data consolidation and type mismatches
+- Multi-tenant isolation ensures each company only sees their own data
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Streamlit |
+| Data Processing | Pandas |
+| Database | PostgreSQL via psycopg2 (Supabase) |
+| Report Generation | FPDF |
+| Configuration | Environment Variables (os.getenv) |
+| Language | Python 3.11 |
+
+---
+
+## Running Locally
+
+```bash
+# Clone the repository
+git clone https://github.com/850258-veni/Sabedoriavenicius-
+cd Sabedoriavenicius-
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set environment variable
+export DATABASE_URL="your_postgresql_connection_string"
+
+# Run the application
+streamlit run app.py
+```
+
+---
+
+## Security Notes
+
+- All database credentials are injected via environment variables
+- API key authentication isolates tenant data at SQL query level
+- No credentials are stored in source code
+
+---
+
+## Author
+
+Built by **Vinícius** — Python Backend Developer specialising in data automation and internal tooling for operations teams.
+
+- Open to remote backend engineering opportunities
+- Focus: Python, PostgreSQL, Pandas, Streamlit, data pipelines
